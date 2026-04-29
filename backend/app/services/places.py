@@ -202,16 +202,48 @@ class OverpassPlacesClient:
         radius_meters = max(800, int(radius_miles * 1609.34))
         query = build_overpass_query(filters, lat=lat, lng=lng, radius_meters=radius_meters)
 
-        async with httpx.AsyncClient(timeout=35) as client:
+        # Overpass rejects anonymous user agents (HTTP 406) — identify the
+        # application so the operators can contact us if we misbehave.
+        # See https://operations.osmfoundation.org/policies/nominatim/ and
+        # the Overpass usage policy.
+        headers = {
+            "User-Agent": "SpinScout/1.0 (+https://spinscout.net; cycling route planner)",
+            "Accept": "application/json",
+            "Accept-Language": "en",
+        }
+
+        async with httpx.AsyncClient(timeout=35, headers=headers) as client:
             response = await client.post(
                 self.base_url,
                 data={"data": query},
             )
 
         if response.status_code >= 400:
-            detail = response.text.strip()
+            # Overpass returns HTML on 4xx/5xx; don't echo it back to the API caller.
+            content_type = response.headers.get("content-type", "")
+            if "json" in content_type:
+                try:
+                    payload = response.json()
+                    detail = (payload.get("error") or payload.get("message") or "").strip()
+                except ValueError:
+                    detail = ""
+            else:
+                detail = response.text.strip().splitlines()[0] if response.text.strip() else ""
+                # Strip HTML tags / doctype noise so the surfaced error is readable.
+                if detail.lower().startswith(("<!doctype", "<html", "<head", "<")):
+                    detail = ""
+
+            if response.status_code == 406:
+                raise PlacesError(
+                    "OpenStreetMap place search rejected the request (HTTP 406). "
+                    "The Overpass API may be blocking the deployment's user-agent or rate-limiting it. "
+                    "Try again in a moment."
+                )
+            if response.status_code == 429:
+                raise PlacesError(
+                    "OpenStreetMap place search is rate-limited right now. Try again in a minute."
+                )
             if detail:
-                detail = detail.splitlines()[0]
                 raise PlacesError(
                     f"OpenStreetMap place search failed with status {response.status_code}: {detail}"
                 )
