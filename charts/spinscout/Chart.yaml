@@ -1,0 +1,6 @@
+apiVersion: v2
+name: spinscout
+description: Helm chart for the Spin Scout frontend, API, PostgreSQL, and Redis stack.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

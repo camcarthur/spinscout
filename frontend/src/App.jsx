@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { fetchJson, getApiUrl } from './api'
 import LocationPickerMap from './LocationPickerMap'
-import RidePlanPreviewMap from './RidePlanPreviewMap'
+import RidePlanResult from './RidePlanResult'
 
 function milesFromMeters(m) {
   if (m == null) return '—'
@@ -95,20 +95,20 @@ const EXPORT_TARGETS = [
 
 const PROMPT_SUGGESTIONS = [
   {
-    label: 'Popular 35 mi',
-    prompt: 'popular with cyclists 35 mile road ride with steady pacing'
+    label: 'Brewery loop',
+    prompt: 'Casual ride to a brewery, around 22 miles, mellow climbing.'
   },
   {
-    label: 'Gravel brewery',
-    prompt: 'gravel ride to a brewery under 20 miles that prioritizes real unpaved paths'
+    label: 'Gravel adventure',
+    prompt: 'Gravel ride that prioritizes real unpaved paths, around 30 miles.'
   },
   {
-    label: 'Lake spin',
-    prompt: 'scenic ride by a lake around 25 miles with moderate climbing'
+    label: 'Coffee spin',
+    prompt: 'Easy spin to a coffee shop somewhere new, around 18 miles.'
   },
   {
-    label: 'Taco training',
-    prompt: 'training ride to a taco shop around 30 miles with solid tempo work'
+    label: 'Tempo on popular roads',
+    prompt: 'Training ride on popular cyclist roads, around 35 miles, steady tempo.'
   }
 ]
 
@@ -346,8 +346,12 @@ function App() {
     }
   }
 
-  async function exportRoute(target) {
-    if (!ridePlan?.route_polyline) {
+  async function exportRoute(target, payload) {
+    // `payload` carries the *active* candidate the user picked in the result component.
+    // Falls back to the recommended route on the plan for backwards compatibility.
+    const polyline = payload?.route_polyline || ridePlan?.route_polyline
+    const routeName = payload?.route_name || ridePlan?.route_name || ridePlan?.title || 'Spin Scout Route'
+    if (!polyline) {
       setError('Generate a route first.')
       return
     }
@@ -362,8 +366,8 @@ function App() {
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          route_name: ridePlan.route_name || ridePlan.title || 'Spin Scout Route',
-          route_polyline: ridePlan.route_polyline,
+          route_name: routeName,
+          route_polyline: polyline,
           target: target.id
         })
       })
@@ -381,7 +385,7 @@ function App() {
       const objectUrl = window.URL.createObjectURL(blob)
       const disposition = response.headers.get('content-disposition') || ''
       const filenameMatch = disposition.match(/filename="([^"]+)"/)
-      const filename = filenameMatch?.[1] || `${ridePlan.route_name || 'spin-scout-route'}.${target.format}`
+      const filename = filenameMatch?.[1] || `${routeName || 'spin-scout-route'}.${target.format}`
 
       const link = document.createElement('a')
       link.href = objectUrl
@@ -580,92 +584,98 @@ function App() {
               </div>
             </div>
 
-            <div className="meta">
-              Optional guardrails: these tighten the generated route, but your written brief is still the main driver.
-            </div>
-            <div className="small-grid">
-              <label>
-                Desired style
-                <select
-                  value={recForm.desired_style}
-                  onChange={(e) => setRecForm({ ...recForm, desired_style: e.target.value })}
-                >
-                  <option value="casual">Casual</option>
-                  <option value="brewery">Brewery</option>
-                  <option value="social">Social</option>
-                  <option value="hard">Hard</option>
-                  <option value="training">Training</option>
-                  <option value="gravel">Gravel</option>
-                  <option value="adventure">Adventure</option>
-                </select>
-              </label>
-              <label>
-                Sport type
-                <input
-                  placeholder="Ride, GravelRide, MountainBikeRide..."
-                  value={recForm.sport_type}
-                  onChange={(e) => setRecForm({ ...recForm, sport_type: e.target.value })}
-                />
-              </label>
-              <label>
-                Min miles
-                <input
-                  type="number"
-                  value={recForm.min_distance_miles}
-                  onChange={(e) => setRecForm({ ...recForm, min_distance_miles: e.target.value })}
-                />
-              </label>
-              <label>
-                Max miles
-                <input
-                  type="number"
-                  value={recForm.max_distance_miles}
-                  onChange={(e) => setRecForm({ ...recForm, max_distance_miles: e.target.value })}
-                />
-              </label>
-              <label>
-                Min elevation (ft)
-                <input
-                  type="number"
-                  value={recForm.min_elevation_ft}
-                  onChange={(e) => setRecForm({ ...recForm, min_elevation_ft: e.target.value })}
-                />
-              </label>
-              <label>
-                Max elevation (ft)
-                <input
-                  type="number"
-                  value={recForm.max_elevation_ft}
-                  onChange={(e) => setRecForm({ ...recForm, max_elevation_ft: e.target.value })}
-                />
-              </label>
-              <label>
-                Target effort (1-10)
-                <input
-                  type="number"
-                  min="1"
-                  max="10"
-                  value={recForm.target_effort}
-                  onChange={(e) => setRecForm({ ...recForm, target_effort: e.target.value })}
-                />
-              </label>
-              <label>
-                Start radius (mi)
-                <input
-                  type="number"
-                  min="1"
-                  placeholder="15"
-                  value={recForm.location_radius_miles}
-                  onChange={(e) => setRecForm({ ...recForm, location_radius_miles: e.target.value })}
-                />
-              </label>
-            </div>
+            <details className="refine-disclosure">
+              <summary>
+                <span className="refine-summary-label">Refine (optional)</span>
+                <span className="meta">
+                  Hard caps on distance, elevation, effort, sport type, or start radius. Leave blank to let the brief decide.
+                </span>
+              </summary>
+              <div className="small-grid" style={{ marginTop: '0.85rem' }}>
+                <label>
+                  Desired style
+                  <select
+                    value={recForm.desired_style}
+                    onChange={(e) => setRecForm({ ...recForm, desired_style: e.target.value })}
+                  >
+                    <option value="casual">Casual</option>
+                    <option value="brewery">Brewery</option>
+                    <option value="social">Social</option>
+                    <option value="hard">Hard</option>
+                    <option value="training">Training</option>
+                    <option value="gravel">Gravel</option>
+                    <option value="adventure">Adventure</option>
+                  </select>
+                </label>
+                <label>
+                  Sport type
+                  <input
+                    placeholder="Ride, GravelRide, MountainBikeRide..."
+                    value={recForm.sport_type}
+                    onChange={(e) => setRecForm({ ...recForm, sport_type: e.target.value })}
+                  />
+                </label>
+                <label>
+                  Min miles
+                  <input
+                    type="number"
+                    value={recForm.min_distance_miles}
+                    onChange={(e) => setRecForm({ ...recForm, min_distance_miles: e.target.value })}
+                  />
+                </label>
+                <label>
+                  Max miles
+                  <input
+                    type="number"
+                    value={recForm.max_distance_miles}
+                    onChange={(e) => setRecForm({ ...recForm, max_distance_miles: e.target.value })}
+                  />
+                </label>
+                <label>
+                  Min elevation (ft)
+                  <input
+                    type="number"
+                    value={recForm.min_elevation_ft}
+                    onChange={(e) => setRecForm({ ...recForm, min_elevation_ft: e.target.value })}
+                  />
+                </label>
+                <label>
+                  Max elevation (ft)
+                  <input
+                    type="number"
+                    value={recForm.max_elevation_ft}
+                    onChange={(e) => setRecForm({ ...recForm, max_elevation_ft: e.target.value })}
+                  />
+                </label>
+                <label>
+                  Target effort (1-10)
+                  <input
+                    type="number"
+                    min="1"
+                    max="10"
+                    value={recForm.target_effort}
+                    onChange={(e) => setRecForm({ ...recForm, target_effort: e.target.value })}
+                  />
+                </label>
+                <label>
+                  Start radius (mi)
+                  <input
+                    type="number"
+                    min="1"
+                    placeholder="15"
+                    value={recForm.location_radius_miles}
+                    onChange={(e) => setRecForm({ ...recForm, location_radius_miles: e.target.value })}
+                  />
+                </label>
+              </div>
+            </details>
+
             <div className="planner-submit">
               <button className="primary" disabled={!selectedUserId || hasBusyAction}>
-                {isGenerating ? 'Generating route...' : 'Generate ride plan'}
+                {isGenerating ? 'Generating routes...' : 'Generate ride options'}
               </button>
               <div className="meta">
-                The planner uses your history for targets and novelty checks, then builds a fresh route from map data.
+                Spin Scout returns 3+ distinct route options. Click any of them on the map or in the result to set it as your pick.
               </div>
             </div>
           </form>
@@ -807,182 +817,20 @@ function App() {
 
       <section className="card" style={{ marginTop: '1rem' }}>
         <div className="section-kicker">Output</div>
-        <h2>Generated ride plan</h2>
+        <h2>Generated ride options</h2>
         {ridePlan ? (
-          <div className="plan-stack">
-            <div className="item plan-head">
-              <div className="row" style={{ justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                <div>
-                  <strong>{ridePlan.title}</strong>
-                  <div className="meta" style={{ marginTop: '0.35rem' }}>{ridePlan.summary}</div>
-                </div>
-                {ridePlan.route_name ? <span className="badge">Route: {ridePlan.route_name}</span> : null}
-              </div>
-              <div className="row" style={{ marginTop: '0.75rem' }}>
-                {ridePlan.location_label ? <span className="badge">{ridePlan.location_label}</span> : null}
-                {ridePlan.destination_label ? <span className="badge">Stop: {ridePlan.destination_label}</span> : null}
-                {ridePlan.provider ? <span className="badge">{ridePlan.provider}</span> : null}
-                {ridePlan.desired_style ? <span className="badge">{ridePlan.desired_style}</span> : null}
-                {ridePlan.intensity_label ? <span className="badge">{ridePlan.intensity_label}</span> : null}
-                {ridePlan.novelty_score != null ? <span className="badge">{ridePlan.novelty_score}% novel</span> : null}
-                {ridePlan.popularity_score != null ? <span className="badge">{ridePlan.popularity_score}/100 popular</span> : null}
-                {ridePlan.trail_percent != null ? <span className="badge">{ridePlan.trail_percent}% trail</span> : null}
-                {ridePlan.major_road_percent != null ? <span className="badge">{ridePlan.major_road_percent}% major roads</span> : null}
-              </div>
-              {ridePlan.popularity_summary ? (
-                <div className="meta" style={{ marginTop: '0.75rem' }}>{ridePlan.popularity_summary}</div>
-              ) : null}
-            </div>
-
-            <RidePlanPreviewMap plan={ridePlan} selectedStartLocation={selectedStartLocation} />
-
-            <div className="small-grid">
-              <div className="item">
-                <strong>{ridePlan.route_distance_miles ?? '—'} mi</strong>
-                <div className="meta">Generated distance</div>
-              </div>
-              <div className="item">
-                <strong>{ridePlan.route_elevation_ft ?? '—'} ft</strong>
-                <div className="meta">Generated climbing</div>
-              </div>
-              <div className="item">
-                <strong>{ridePlan.route_duration_min ?? '—'} min</strong>
-                <div className="meta">Generated duration</div>
-              </div>
-              <div className="item">
-                <strong>{ridePlan.target_distance_miles ?? '—'} mi</strong>
-                <div className="meta">Target distance</div>
-              </div>
-              <div className="item">
-                <strong>{ridePlan.target_elevation_ft ?? '—'} ft</strong>
-                <div className="meta">Target climbing</div>
-              </div>
-              <div className="item">
-                <strong>{ridePlan.surface_summary ?? '—'}</strong>
-                <div className="meta">Surface mix</div>
-              </div>
-              <div className="item">
-                <strong>{ridePlan.destination_distance_miles ?? '—'} mi</strong>
-                <div className="meta">Distance from route to requested stop</div>
-              </div>
-              <div className="item">
-                <strong>{ridePlan.target_avg_watts ?? '—'} W</strong>
-                <div className="meta">Avg power target</div>
-              </div>
-              <div className="item">
-                <strong>{ridePlan.target_avg_heartrate ?? '—'} bpm</strong>
-                <div className="meta">Avg HR target</div>
-              </div>
-              <div className="item">
-                <strong>{ridePlan.popularity_score != null ? `${ridePlan.popularity_score}/100` : '—'}</strong>
-                <div className="meta">Cyclist popularity</div>
-              </div>
-            </div>
-
-            <div className="item">
-              <strong>Why this plan</strong>
-              <div className="plan-points">
-                {ridePlan.explanation.map((point, index) => (
-                  <div key={`${point}-${index}`} className="meta">{point}</div>
-                ))}
-              </div>
-            </div>
-
-            <div className="item">
-              <strong>Included Strava segments</strong>
-              <div className="meta" style={{ marginTop: '0.35rem' }}>
-                Spin Scout matched these Strava segments to the generated route. Current times are your current recorded Strava bests when Strava exposes them.
-              </div>
-              {ridePlan.included_segments?.length ? (
-                <div className="segment-list">
-                  {ridePlan.included_segments.map((segment) => (
-                    <div key={segment.id} className="segment-card">
-                      <div className="row" style={{ justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                        <strong>{segment.name}</strong>
-                        {segment.popularity_score != null ? (
-                          <span className="badge">{segment.popularity_score}/100 popular</span>
-                        ) : null}
-                      </div>
-                      <div className="meta">
-                        {segment.distance_miles ?? '—'} mi · {segment.avg_grade ?? '—'}% avg grade · {segment.route_overlap_percent ?? '—'}% of segment overlaps this route
-                      </div>
-                      <div className="meta">
-                        {segment.athlete_count ?? '—'} athletes · {segment.effort_count ?? '—'} efforts · {segment.star_count ?? '—'} stars
-                      </div>
-                      <div className="meta">
-                        {segment.current_time_seconds != null
-                          ? `${segment.current_time_source || 'Current Strava time'}: ${formatDurationSeconds(segment.current_time_seconds)}`
-                          : 'No current Strava time on this segment yet.'}
-                        {segment.athlete_effort_count > 0 ? ` · ${segment.athlete_effort_count} efforts logged by you` : ''}
-                        {segment.current_time_date ? ` · ${formatDateLabel(segment.current_time_date)}` : ''}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <div className="meta" style={{ marginTop: '0.75rem' }}>
-                  No Strava segments were confidently matched onto this route.
-                </div>
-              )}
-            </div>
-
-            <div className="item">
-              <strong>Send this route to another app</strong>
-              <div className="meta" style={{ marginTop: '0.35rem' }}>
-                Pick your route platform and Spin Scout will download the file format that fits it best.
-              </div>
-              <div className="export-grid">
-                {EXPORT_TARGETS.map((target) => (
-                  <button
-                    key={target.id}
-                    type="button"
-                    className="secondary export-option"
-                    onClick={() => exportRoute(target)}
-                    disabled={exportingTargetId === target.id}
-                  >
-                    <strong>{exportingTargetId === target.id ? 'Preparing...' : target.label}</strong>
-                    <div className="meta">{target.format.toUpperCase()} · {target.hint}</div>
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div>
-              <h3 style={{ marginBottom: '0.75rem' }}>Alternative generated routes</h3>
-              <div className="list">
-                {recommendations.map((item) => (
-                  <div key={`${item.name}-${item.score}`} className="item">
-                    <div className="row" style={{ justifyContent: 'space-between' }}>
-                      <strong>{item.name}</strong>
-                      <span className="badge">score {item.score}</span>
-                    </div>
-                    <div className="meta">
-                      {item.distance_miles ?? '—'} mi · {item.elevation_ft ?? '—'} ft · {item.duration_min ?? '—'} min
-                    </div>
-                    <div className="meta">
-                      {item.novelty_score ?? '—'}% novel · {item.popularity_score != null ? `${item.popularity_score}/100 popular` : 'popularity n/a'} · {item.trail_percent ?? '—'}% trail · {item.unpaved_percent ?? '—'}% unpaved · {item.major_road_percent ?? '—'}% major roads
-                    </div>
-                    {item.destination_label ? (
-                      <div className="meta">
-                        Destination: {item.destination_label} · route comes within {item.destination_distance_miles ?? '—'} mi
-                      </div>
-                    ) : null}
-                    {item.surface_summary ? <div className="meta">{item.surface_summary}</div> : null}
-                    {item.summary ? <div className="meta">{item.summary}</div> : null}
-                    <div>{item.reason}</div>
-                  </div>
-                ))}
-                {!recommendations.length ? (
-                  <div className="meta">No alternatives yet. This is the strongest generated loop from the current request.</div>
-                ) : null}
-              </div>
-            </div>
-          </div>
+          <RidePlanResult
+            plan={ridePlan}
+            selectedStartLocation={selectedStartLocation}
+            exportTargets={EXPORT_TARGETS}
+            onExport={exportRoute}
+            exportingTargetId={exportingTargetId}
+          />
         ) : (
           <div className="empty-plan">
             <strong>Ready to sketch the day</strong>
             <div className="meta" style={{ marginTop: '0.45rem' }}>
-              Pick a starting location, describe the kind of ride you want, and Spin Scout will generate a fresh route from map data while using your history for targets and novelty checks.
+              Pick a starting location, describe the kind of ride you want, and Spin Scout will generate a few distinct route options you can compare side-by-side on the map.
             </div>
             <div className="prompt-shelf" style={{ marginTop: '1rem' }}>
               {PROMPT_SUGGESTIONS.slice(0, 3).map((suggestion) => (

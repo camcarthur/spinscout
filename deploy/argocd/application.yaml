@@ -1,0 +1,23 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: spinscout
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/your-org/spinscout.git
+    targetRevision: main
+    path: charts/spinscout
+    helm:
+      valueFiles:
+        - values-proxmox.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: spinscout
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

@@ -1,0 +1,41 @@
+frontend:
+  image:
+    repository: ghcr.io/your-org/spinscout-frontend
+    tag: latest
+  apiUrl: https://api.spinscout.example.com
+  ingress:
+    enabled: true
+    className: nginx
+    host: spinscout.example.com
+    tls:
+      - hosts:
+          - spinscout.example.com
+        secretName: spinscout-frontend-tls
+
+api:
+  image:
+    repository: ghcr.io/your-org/spinscout-api
+    tag: latest
+  frontendUrl: https://spinscout.example.com
+  stravaRedirectUri: https://api.spinscout.example.com/api/auth/strava/callback
+  ingress:
+    enabled: true
+    className: nginx
+    host: api.spinscout.example.com
+    tls:
+      - hosts:
+          - api.spinscout.example.com
+        secretName: spinscout-api-tls
+  existingSecret: spinscout-api-secrets
+
+postgresql:
+  enabled: true
+  persistence:
+    enabled: true
+    size: 20Gi
+    storageClass: ""
+
+redis:
+  enabled: true
+  persistence:
+    enabled: false

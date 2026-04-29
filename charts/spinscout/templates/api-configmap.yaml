@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "spinscout.fullname" . }}-api-config
+  labels:
+    {{- include "spinscout.labels" . | nindent 4 }}
+data:
+  FRONTEND_URL: {{ .Values.api.frontendUrl | quote }}
+  ROUTING_PROVIDER: {{ .Values.api.routingProvider | quote }}
+  GRAPHHOPPER_BASE_URL: {{ .Values.api.graphhopperBaseUrl | quote }}
+  OVERPASS_API_URL: {{ .Values.api.overpassApiUrl | quote }}
+  STRAVA_REDIRECT_URI: {{ .Values.api.stravaRedirectUri | quote }}
+  STRAVA_SCOPES: {{ .Values.api.stravaScopes | quote }}

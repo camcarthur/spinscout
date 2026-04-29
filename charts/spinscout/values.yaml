@@ -1,0 +1,100 @@
+nameOverride: ""
+fullnameOverride: ""
+
+imagePullSecrets: []
+
+serviceAccount:
+  create: false
+  annotations: {}
+  name: ""
+
+frontend:
+  replicaCount: 1
+  image:
+    repository: ghcr.io/example/spinscout-frontend
+    tag: latest
+    pullPolicy: IfNotPresent
+  apiUrl: https://api.spinscout.example.com
+  service:
+    type: ClusterIP
+    port: 5173
+  ingress:
+    enabled: true
+    className: ""
+    annotations: {}
+    host: spinscout.example.com
+    tls: []
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+api:
+  replicaCount: 1
+  image:
+    repository: ghcr.io/example/spinscout-api
+    tag: latest
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 8000
+  frontendUrl: https://spinscout.example.com
+  stravaRedirectUri: https://api.spinscout.example.com/api/auth/strava/callback
+  routingProvider: graphhopper
+  graphhopperBaseUrl: https://graphhopper.com/api/1
+  overpassApiUrl: https://overpass-api.de/api/interpreter
+  stravaScopes: read,activity:read_all
+  existingSecret: ""
+  secrets:
+    stravaClientId: ""
+    stravaClientSecret: ""
+    graphhopperApiKey: ""
+    appSecret: change-me
+  ingress:
+    enabled: true
+    className: ""
+    annotations: {}
+    host: api.spinscout.example.com
+    tls: []
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+postgresql:
+  enabled: true
+  image:
+    repository: postgis/postgis
+    tag: 17-3.5
+    pullPolicy: IfNotPresent
+  database: rideplanner
+  username: postgres
+  password: postgres
+  service:
+    port: 5432
+  persistence:
+    enabled: true
+    size: 10Gi
+    storageClass: ""
+  resources: {}
+
+externalDatabase:
+  url: ""
+
+redis:
+  enabled: true
+  image:
+    repository: redis
+    tag: "7"
+    pullPolicy: IfNotPresent
+  database: 0
+  service:
+    port: 6379
+  persistence:
+    enabled: false
+    size: 2Gi
+    storageClass: ""
+  resources: {}
+
+externalRedis:
+  url: ""

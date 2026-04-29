@@ -500,3 +500,113 @@ label {
     height: 280px;
   }
 }
+
+/* ----- Route picker (alternatives as first-class options) ----- */
+
+.route-picker {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0.75rem;
+  margin-top: 0.5rem;
+}
+
+.route-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  padding: 0.85rem 0.95rem;
+  background: var(--surface-soft, #f7f9fc);
+  border: 1.5px solid transparent;
+  border-radius: 12px;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 120ms ease, transform 120ms ease, background 120ms ease;
+  font: inherit;
+  color: inherit;
+}
+
+.route-card:hover {
+  background: #eef2ff;
+}
+
+.route-card--active {
+  border-color: #155eef;
+  background: #eef4ff;
+  box-shadow: 0 1px 0 rgba(21, 94, 239, 0.18);
+}
+
+.route-card__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.route-card__metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  color: var(--text-secondary, #475467);
+  font-size: 0.92rem;
+}
+
+.route-card__signals {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
+.route-card__reason {
+  font-size: 0.88rem;
+  color: var(--text-secondary, #475467);
+  line-height: 1.35;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  background: rgba(21, 94, 239, 0.08);
+  color: #1d4ed8;
+  font-size: 0.78rem;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+}
+
+.badge--accent {
+  background: #155eef;
+  color: white;
+}
+
+/* Collapsible "Refine" disclosure for advanced guardrails */
+
+.refine-disclosure {
+  border: 1px dashed rgba(15, 23, 42, 0.18);
+  border-radius: 12px;
+  padding: 0.75rem 0.95rem;
+  background: rgba(247, 249, 252, 0.55);
+}
+
+.refine-disclosure[open] {
+  background: rgba(247, 249, 252, 0.95);
+}
+
+.refine-disclosure > summary {
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  list-style: none;
+  outline: none;
+}
+
+.refine-disclosure > summary::-webkit-details-marker {
+  display: none;
+}
+
+.refine-summary-label {
+  font-weight: 600;
+  font-size: 0.95rem;
+  color: var(--text-primary, #101828);
+}

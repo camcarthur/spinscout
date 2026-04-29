@@ -31,8 +31,23 @@ from app.schemas import (
     RideFeedbackOut,
     UserOut,
 )
+from app.services.candidates import (
+    CandidatePlanInputs,
+    deduplicate_by_bearing,
+    plan_candidate_requests,
+)
 from app.services.places import OverpassPlacesClient, PlaceCandidate, PlacesError
 from app.services.routing import GeneratedRoute, GraphHopperClient, RoutingError, decode_polyline, encode_polyline
+from app.services.scoring import (
+    POPULARITY_OVERLAP_THRESHOLD,
+    RideContext,
+    distance_tolerance_miles,
+    filter_destination_candidates,
+    filter_gravel_candidates,
+    gravel_signal,
+    route_within_distance_goal,
+    score_candidate,
+)
 from app.services.strava import StravaClient, ensure_valid_token, upsert_activities, upsert_user_from_token_data
 
 app = FastAPI(title=settings.app_name)
@@ -451,38 +466,6 @@ def clamp_number(value: float, minimum: float | None, maximum: float | None) -> 
     return value
 
 
-def build_round_trip_distances(
-    target_distance_miles: float | None,
-    min_distance_miles: float | None,
-    max_distance_miles: float | None,
-) -> list[float]:
-    if target_distance_miles is not None:
-        base_distance = target_distance_miles
-    elif min_distance_miles is not None and max_distance_miles is not None:
-        base_distance = (min_distance_miles + max_distance_miles) / 2
-    elif min_distance_miles is not None:
-        base_distance = min_distance_miles + 4
-    elif max_distance_miles is not None:
-        base_distance = max(8.0, max_distance_miles * 0.85)
-    else:
-        base_distance = 18.0
-
-    candidates = []
-    for multiplier in (0.88, 0.95, 1.0, 1.05, 1.12, 1.2):
-        distance = clamp_number(base_distance * multiplier, min_distance_miles, max_distance_miles)
-        candidates.append(round(max(6.0, distance), 2))
-
-    seen = set()
-    unique = []
-    for item in candidates:
-        key = round(item, 1)
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(item)
-    return unique
-
-
 def is_gravel_request(
     desired_style: str | None,
     requested_sport_type: str | None,
@@ -728,6 +711,7 @@ async def summarize_route_segments(
     route: GeneratedRoute,
     *,
     access_token: str,
+    overlap_threshold: float = 32.0,
 ) -> tuple[list[IncludedSegmentOut], float | None]:
     bounds = build_route_bounds(route.points)
     if bounds is None:
@@ -744,7 +728,7 @@ async def summarize_route_segments(
 
         segment_points = segment_points_from_payload(explored_segment)
         overlap_percent = segment_route_overlap_percent(route.points, segment_points)
-        if overlap_percent is None or overlap_percent < 32:
+        if overlap_percent is None or overlap_percent < overlap_threshold:
             continue
 
         matched_segments.append(
@@ -818,87 +802,6 @@ async def summarize_route_segments(
     return included_segments, round(route_popularity_score, 0) if route_popularity_score is not None else None
 
 
-def gravel_signal(route: GeneratedRoute) -> float:
-    trail = route.trail_percent or 0.0
-    unpaved = route.unpaved_percent or 0.0
-    bike_network = route.bike_network_percent or 0.0
-    major = route.major_road_percent or 0.0
-    return trail * 0.9 + unpaved * 1.1 + bike_network * 0.2 - major * 0.8
-
-
-def weighted_route_share(routes: list[GeneratedRoute], attribute: str) -> float | None:
-    weighted_values = [
-        (getattr(route, attribute), route.distance_miles or 0.0)
-        for route in routes
-        if getattr(route, attribute) is not None
-    ]
-    return weighted_average(weighted_values)
-
-
-def combine_generated_routes(routes: list[GeneratedRoute]) -> GeneratedRoute:
-    valid_routes = [route for route in routes if route.points]
-    if not valid_routes:
-        raise RoutingError("The destination route could not be assembled from map segments.")
-
-    combined_points: list[tuple[float, float]] = []
-    for route in valid_routes:
-        for point in route.points:
-            if combined_points and haversine_miles(combined_points[-1][0], combined_points[-1][1], point[0], point[1]) < 0.01:
-                continue
-            combined_points.append(point)
-
-    distance_miles = sum(route.distance_miles or 0.0 for route in valid_routes)
-    elevation_ft = sum(route.elevation_ft or 0.0 for route in valid_routes)
-    duration_min = sum(route.duration_min or 0 for route in valid_routes)
-
-    surface_parts = [route.surface_summary for route in valid_routes if route.surface_summary]
-    if not surface_parts:
-        surface_summary = None
-    elif len(set(surface_parts)) == 1:
-        surface_summary = surface_parts[0]
-    else:
-        surface_summary = "Mixed surfaces across the destination approach and loop."
-
-    return GeneratedRoute(
-        route_polyline=encode_polyline(combined_points),
-        points=combined_points,
-        distance_miles=round(distance_miles, 2) if distance_miles else None,
-        elevation_ft=round(elevation_ft, 0) if elevation_ft else None,
-        duration_min=duration_min or None,
-        trail_percent=round(weighted_route_share(valid_routes, "trail_percent") or 0.0, 0),
-        bike_network_percent=round(weighted_route_share(valid_routes, "bike_network_percent") or 0.0, 0),
-        unpaved_percent=round(weighted_route_share(valid_routes, "unpaved_percent") or 0.0, 0),
-        major_road_percent=round(weighted_route_share(valid_routes, "major_road_percent") or 0.0, 0),
-        surface_summary=surface_summary,
-        provider=valid_routes[0].provider,
-    )
-
-
-def distance_tolerance_miles(target_distance_miles: float | None) -> float:
-    if target_distance_miles is None:
-        return 5.0
-    return clamp_number(target_distance_miles * 0.18, 3.0, 8.0)
-
-
-def route_within_distance_goal(
-    route_distance_miles: float | None,
-    *,
-    target_distance_miles: float | None,
-    min_distance_miles: float | None,
-    max_distance_miles: float | None,
-    strict: bool = False,
-) -> bool:
-    if route_distance_miles is None:
-        return False
-    if min_distance_miles is not None and route_distance_miles < min_distance_miles * (0.95 if strict else 0.9):
-        return False
-    if max_distance_miles is not None and route_distance_miles > max_distance_miles * (1.05 if strict else 1.12):
-        return False
-    if target_distance_miles is not None:
-        return abs(route_distance_miles - target_distance_miles) <= distance_tolerance_miles(target_distance_miles)
-    return True
-
-
 def rank_destination_places(
     places: list[PlaceCandidate],
     *,
@@ -920,48 +823,6 @@ def rank_destination_places(
         places,
         key=lambda place: (abs(place.distance_miles - ideal_outbound), -place.distance_miles),
     )
-
-
-async def build_destination_route_candidate(
-    *,
-    place: PlaceCandidate,
-    start: tuple[float, float],
-    target_distance_miles: float | None,
-    desired_style: str | None,
-    intensity_label: str | None,
-    sport_type: str | None,
-    seed: int,
-) -> GeneratedRoute:
-    outbound_route = await routing_client.generate_route(
-        points=[start, (place.lat, place.lng)],
-        desired_style=desired_style,
-        intensity_label=intensity_label,
-        sport_type=sport_type,
-    )
-    return_route = await routing_client.generate_route(
-        points=[(place.lat, place.lng), start],
-        desired_style=desired_style,
-        intensity_label=intensity_label,
-        sport_type=sport_type,
-    )
-
-    segments = [outbound_route]
-    connector_distance = (outbound_route.distance_miles or 0.0) + (return_route.distance_miles or 0.0)
-    remaining_distance = (target_distance_miles or 0.0) - connector_distance
-    if remaining_distance >= 6.0:
-        destination_loop = await routing_client.generate_round_trip(
-            start_lat=place.lat,
-            start_lng=place.lng,
-            distance_miles=remaining_distance,
-            seed=seed,
-            desired_style=desired_style,
-            intensity_label=intensity_label,
-            sport_type=sport_type,
-        )
-        segments.append(destination_loop)
-
-    segments.append(return_route)
-    return combine_generated_routes(segments)
 
 
 def build_route_cells(points: list[tuple[float, float]], trim: bool = False) -> set[str]:
@@ -991,12 +852,6 @@ def build_historical_footprint(activities: list[Activity]) -> set[str]:
             continue
         ridden_cells.update(build_route_cells(decode_polyline(polyline), trim=True))
     return ridden_cells
-
-
-def calculate_overlap_percent(candidate_cells: set[str], ridden_cells: set[str]) -> float | None:
-    if not candidate_cells or not ridden_cells:
-        return None
-    return (len(candidate_cells & ridden_cells) / len(candidate_cells)) * 100
 
 
 def resolve_location_label(
@@ -1474,163 +1329,67 @@ async def generate_ride_plan(
         except PlacesError:
             gravel_segments = []
 
-    route_distances = build_round_trip_distances(
+    # ----- Plan and dispatch the candidate routing calls (services/candidates) -----
+    plan_inputs = CandidatePlanInputs(
+        routing_client=routing_client,
+        start=selected_start,
+        desired_style=desired_style,
+        intensity_label=intensity_label,
+        sport_type=requested_sport_type,
         target_distance_miles=target_distance_miles,
         min_distance_miles=min_distance_miles,
         max_distance_miles=max_distance_miles,
+        destination_places=destination_places,
+        destination_category=destination_category,
+        gravel_segments=gravel_segments,
+        gravel_requested=gravel_requested,
+        explicit_distance_requested=explicit_distance_requested,
     )
-    route_seeds = (11, 23, 37, 53, 71, 89, 101, 127, 149, 173)
-    route_requests: list[tuple[str, PlaceCandidate | None, object]] = []
-    loop_request_count = 4 if destination_category else 6
-    for index, distance in enumerate(route_distances[:loop_request_count]):
-        route_requests.append(
-            (
-                "loop",
-                None,
-                routing_client.generate_round_trip(
-                    start_lat=selected_start[0],
-                    start_lng=selected_start[1],
-                    distance_miles=distance,
-                    seed=route_seeds[index],
-                    desired_style=desired_style,
-                    intensity_label=intensity_label,
-                    sport_type=requested_sport_type,
-                ),
-            )
-        )
-
-    if destination_category or gravel_requested:
-        anchor_distance = route_distances[min(len(route_distances) - 1, len(route_distances) // 2)]
-        extra_loop_count = 1 if destination_category else 4
-        for seed in route_seeds[len(route_requests) : len(route_requests) + extra_loop_count]:
-            route_requests.append(
-                (
-                    "loop",
-                    None,
-                    routing_client.generate_round_trip(
-                        start_lat=selected_start[0],
-                        start_lng=selected_start[1],
-                        distance_miles=anchor_distance,
-                        seed=seed,
-                        desired_style=desired_style,
-                        intensity_label=intensity_label,
-                        sport_type=requested_sport_type,
-                    ),
-                )
-            )
-
-    destination_candidate_limit = 1 if explicit_distance_requested else 2
-    destination_candidate_places = destination_places[:destination_candidate_limit] if destination_category else []
-    for index, place in enumerate(destination_candidate_places):
-        route_requests.append(
-            (
-                "destination_route",
-                place,
-                build_destination_route_candidate(
-                    place=place,
-                    start=selected_start,
-                    target_distance_miles=target_distance_miles,
-                    desired_style=desired_style,
-                    intensity_label=intensity_label,
-                    sport_type=requested_sport_type,
-                    seed=route_seeds[6 + index],
-                ),
-            )
-        )
-
-    for segment in gravel_segments[:2]:
-        route_requests.append(
-            (
-                "gravel_anchor",
-                segment,
-                routing_client.generate_route(
-                    points=[selected_start, (segment.lat, segment.lng), selected_start],
-                    desired_style=desired_style,
-                    intensity_label=intensity_label,
-                    sport_type=requested_sport_type,
-                ),
-            )
-        )
-
-    if gravel_requested and len(gravel_segments) >= 2 and (target_distance_miles or 0) >= 15:
-        route_requests.append(
-            (
-                "gravel_anchor",
-                gravel_segments[0],
-                routing_client.generate_route(
-                    points=[
-                        selected_start,
-                        (gravel_segments[0].lat, gravel_segments[0].lng),
-                        (gravel_segments[1].lat, gravel_segments[1].lng),
-                        selected_start,
-                    ],
-                    desired_style=desired_style,
-                    intensity_label=intensity_label,
-                    sport_type=requested_sport_type,
-                ),
-            )
-        )
-
+    candidate_requests = plan_candidate_requests(plan_inputs)
     generated_results = await asyncio.gather(
-        *(request[2] for request in route_requests),
+        *(request.factory() for request in candidate_requests),
         return_exceptions=True,
     )
 
     ridden_cells = build_historical_footprint(activities)
-    scored_candidates = []
+    ride_context = RideContext(
+        desired_style=desired_style,
+        intensity_label=intensity_label,
+        sport_type=requested_sport_type,
+        target_distance_miles=target_distance_miles,
+        min_distance_miles=min_distance_miles,
+        max_distance_miles=max_distance_miles,
+        target_elevation_ft=target_elevation_ft,
+        min_elevation_ft=min_elevation_ft,
+        max_elevation_ft=max_elevation_ft,
+        target_duration_min=target_duration_min,
+        destination_category=destination_category,
+        destination_places=destination_places,
+        explicit_distance_requested=explicit_distance_requested,
+        gravel_requested=gravel_requested,
+        prefer_popular_routes=prefer_popular_routes,
+        destination_threshold_miles=destination_threshold_miles(destination_category),
+    )
+
+    scored_candidates: list[dict] = []
     route_failures: list[str] = []
+    planner_warnings: list[str] = []
 
-    def score_generated_route(
-        route: GeneratedRoute,
-        *,
-        route_mode: str,
-        anchor_place: PlaceCandidate | None,
-    ) -> dict:
-        route_cells = build_route_cells(route.points, trim=True)
-        overlap_percent = calculate_overlap_percent(route_cells, ridden_cells)
-        novelty_score = round(100 - overlap_percent, 0) if overlap_percent is not None else None
+    for request, result in zip(candidate_requests, generated_results):
+        if isinstance(result, Exception):
+            message = str(result)
+            if message:
+                route_failures.append(message)
+            continue
 
-        score = 0.0
-        reasons: list[str] = []
-        matched_destination: PlaceCandidate | None = None
-        destination_distance_miles: float | None = None
+        route: GeneratedRoute = result
+        if not route.points:
+            continue
 
-        if target_distance_miles is not None and route.distance_miles is not None:
-            distance_gap = abs(route.distance_miles - target_distance_miles)
-            score += max(0.0, 34 - distance_gap * 4)
-            if distance_gap <= 2.0:
-                reasons.append("Its mileage lands close to the target from your brief.")
-        else:
-            if min_distance_miles is not None and route.distance_miles is not None and route.distance_miles >= min_distance_miles:
-                score += 8
-            if max_distance_miles is not None and route.distance_miles is not None and route.distance_miles <= max_distance_miles:
-                score += 8
-
-        if target_elevation_ft is not None and route.elevation_ft is not None:
-            elevation_gap = abs(route.elevation_ft - target_elevation_ft)
-            score += max(0.0, 24 - elevation_gap / 170)
-            if elevation_gap <= 500:
-                reasons.append("Its climbing load fits the kind of day you described.")
-        else:
-            if min_elevation_ft is not None and route.elevation_ft is not None and route.elevation_ft >= min_elevation_ft:
-                score += 6
-            if max_elevation_ft is not None and route.elevation_ft is not None and route.elevation_ft <= max_elevation_ft:
-                score += 6
-
-        if target_duration_min is not None and route.duration_min is not None:
-            duration_gap = abs(route.duration_min - target_duration_min)
-            score += max(0.0, 12 - duration_gap / 5)
-
-        if novelty_score is not None:
-            score += novelty_score * 0.45
-            if novelty_score >= 70:
-                reasons.append("Most of the route footprint is fresh relative to your synced rides.")
-            elif novelty_score >= 50:
-                reasons.append("It still opens up a lot of terrain you have not logged yet.")
-
+        # Resolve destination match once per candidate, before scoring.
         if destination_category and destination_places:
-            if anchor_place and route_mode.startswith("destination"):
-                matched_destination = anchor_place
+            if request.anchor_place and request.mode.startswith("destination"):
+                matched_destination = request.anchor_place
                 destination_distance_miles = 0.0
             else:
                 matched_destination, destination_distance_miles = route_destination_match(
@@ -1638,145 +1397,39 @@ async def generate_ride_plan(
                     destination_places,
                     sample=True,
                 )
-            proximity_threshold = destination_threshold_miles(destination_category)
-
-            if destination_distance_miles is not None:
-                if destination_distance_miles <= proximity_threshold:
-                    score += 44
-                    if matched_destination:
-                        reasons.append(f"It takes you right by {matched_destination.label}.")
-                elif destination_distance_miles <= proximity_threshold * 2.25:
-                    score += max(8.0, 28 - destination_distance_miles * 18)
-                    if matched_destination:
-                        reasons.append(f"It passes close to {matched_destination.label}.")
-                else:
-                    score -= 28
-
-        if explicit_distance_requested and target_distance_miles is not None and route.distance_miles is not None:
-            distance_gap = abs(route.distance_miles - target_distance_miles)
-            score -= max(0.0, distance_gap - distance_tolerance_miles(target_distance_miles)) * 2.6
-
-        if gravel_requested:
-            if route.trail_percent is not None:
-                score += route.trail_percent * 0.3
-                if route.trail_percent >= 18:
-                    reasons.append("It uses mapped trail and track segments.")
-            if route.unpaved_percent is not None:
-                score += route.unpaved_percent * 0.42
-                if route.unpaved_percent >= 18:
-                    reasons.append("It includes real unpaved terrain instead of defaulting to pavement.")
-            if route.major_road_percent is not None:
-                score += max(0.0, 16 - route.major_road_percent * 0.45)
-                if route.major_road_percent <= 12:
-                    reasons.append("It keeps major-road exposure low for a more legitimate gravel route.")
-                if route.major_road_percent > 18:
-                    score -= (route.major_road_percent - 18) * 1.8
-            if route_mode == "gravel_anchor":
-                score += 12
-                reasons.append("It deliberately routes through nearby gravel-tagged map segments.")
-            if (route.unpaved_percent or 0) < 8 and (route.trail_percent or 0) < 8 and (route.major_road_percent or 0) > 24:
-                score -= 42
-        elif desired_style in {"brewery", "casual", "social", "recovery"} or destination_category in {
-            "taco_shop",
-            "coffee_shop",
-            "bakery",
-        } or (requested_sport_type or "").lower() == "ride":
-            if route.bike_network_percent is not None:
-                score += route.bike_network_percent * 0.18
-                if route.bike_network_percent >= 35:
-                    reasons.append("It leans on mapped bike-network segments for a lower-stress route.")
-            if route.unpaved_percent is not None:
-                score += max(0.0, 12 - route.unpaved_percent * 0.2)
-            if route.major_road_percent is not None and route.major_road_percent > 24:
-                score -= (route.major_road_percent - 24) * 0.9
         else:
-            if route.bike_network_percent is not None:
-                score += route.bike_network_percent * 0.08
-            if route.trail_percent is not None:
-                score += route.trail_percent * 0.08
+            matched_destination, destination_distance_miles = None, None
 
-        if intensity_label in {"hard", "training"}:
-            if route.elevation_ft is not None and route.elevation_ft >= 1500:
-                score += 8
-            if route.distance_miles is not None and route.distance_miles >= 15:
-                score += 6
-        elif intensity_label in {"recovery", "endurance"} and route.unpaved_percent is not None and route.unpaved_percent <= 25:
-            score += 4
-
-        if min_distance_miles is not None and route.distance_miles is not None and route.distance_miles < min_distance_miles * 0.9:
-            score -= 24
-        if max_distance_miles is not None and route.distance_miles is not None and route.distance_miles > max_distance_miles * 1.12:
-            score -= 24
-        if min_elevation_ft is not None and route.elevation_ft is not None and route.elevation_ft < min_elevation_ft * 0.8:
-            score -= 14
-        if max_elevation_ft is not None and route.elevation_ft is not None and route.elevation_ft > max_elevation_ft * 1.18:
-            score -= 14
-
-        return {
-            "route": route,
-            "route_mode": route_mode,
-            "anchor_place": anchor_place,
-            "destination_place": matched_destination,
-            "destination_distance_miles": round(destination_distance_miles, 2)
-            if destination_distance_miles is not None
-            else None,
-            "score": round(score, 2),
-            "reasons": list(dict.fromkeys(reasons)),
-            "novelty_score": novelty_score,
-            "overlap_percent": round(overlap_percent, 0) if overlap_percent is not None else None,
-            "route_cells": route_cells,
-            "gravel_signal": round(gravel_signal(route), 2),
-            "included_segments": [],
-            "popularity_score": None,
-            "popularity_summary": None,
-        }
-
-    for (route_mode, anchor_place, _), generated_result in zip(route_requests, generated_results):
-        if isinstance(generated_result, Exception):
-            message = str(generated_result)
-            if message:
-                route_failures.append(message)
-            continue
-
-        route: GeneratedRoute = generated_result
         scored_candidates.append(
-            score_generated_route(route, route_mode=route_mode, anchor_place=anchor_place)
+            score_candidate(
+                route=route,
+                route_mode=request.mode,
+                anchor_place=request.anchor_place,
+                context=ride_context,
+                ridden_cells=ridden_cells,
+                route_cells=build_route_cells(route.points, trim=True),
+                matched_destination=matched_destination,
+                destination_distance_miles=destination_distance_miles,
+            )
         )
 
     if not scored_candidates:
         detail = route_failures[0] if route_failures else "No new routes could be generated from the selected start."
         raise HTTPException(status_code=502, detail=detail)
 
+    # ----- Hard filters: destinations remain blocking, gravel falls back gracefully -----
     if destination_category:
-        proximity_threshold = destination_threshold_miles(destination_category) * 2.25
-        destination_ready = [
-            candidate
-            for candidate in scored_candidates
-            if candidate["destination_distance_miles"] is not None
-            and float(candidate["destination_distance_miles"]) <= proximity_threshold
-        ]
-        if not destination_ready:
+        scored_candidates, destination_warning = filter_destination_candidates(
+            scored_candidates,
+            context=ride_context,
+        )
+        if not scored_candidates:
             label = destination_label(destination_category) or "destination"
             raise HTTPException(
                 status_code=502,
                 detail=f"I found nearby {label} options, but none of the generated routes could get close enough to one.",
             )
-        scored_candidates = destination_ready
-
-        distance_ready = [
-            candidate
-            for candidate in scored_candidates
-            if route_within_distance_goal(
-                candidate["route"].distance_miles,
-                target_distance_miles=target_distance_miles,
-                min_distance_miles=min_distance_miles,
-                max_distance_miles=max_distance_miles,
-                strict=explicit_distance_requested,
-            )
-        ]
-        if distance_ready:
-            scored_candidates = distance_ready
-        elif explicit_distance_requested:
+        if destination_warning == "destination_distance_unsatisfied":
             label = destination_label(destination_category) or "destination"
             raise HTTPException(
                 status_code=502,
@@ -1787,30 +1440,17 @@ async def generate_ride_plan(
             )
 
     if gravel_requested:
-        best_gravel_signal = max(float(candidate["gravel_signal"]) for candidate in scored_candidates)
-        gravel_forward = [
-            candidate
-            for candidate in scored_candidates
-            if (
-                float(candidate["gravel_signal"]) >= best_gravel_signal - 15
-                or ((candidate["route"].unpaved_percent or 0) >= 14)
-                or ((candidate["route"].trail_percent or 0) >= 12)
-            )
-            and (candidate["route"].major_road_percent or 0) <= 38
-        ]
-        if gravel_forward:
-            scored_candidates = gravel_forward
-        elif gravel_segments:
-            raise HTTPException(
-                status_code=502,
-                detail=(
-                    "Nearby gravel paths were found, but the generated routes still leaned too heavily on major roads. "
-                    "Try a slightly different start point or a longer distance."
-                ),
-            )
+        scored_candidates, gravel_warning = filter_gravel_candidates(
+            scored_candidates,
+            has_gravel_segments=bool(gravel_segments),
+        )
+        if gravel_warning:
+            planner_warnings.append(gravel_warning)
 
     scored_candidates.sort(key=lambda candidate: candidate["score"], reverse=True)
-    unique_candidates = []
+
+    # Footprint-similarity dedupe on top of bearing dedupe — kills near-identical loops.
+    unique_candidates: list[dict] = []
     for candidate in scored_candidates:
         route_cells = candidate["route_cells"]
         duplicate = False
@@ -1823,10 +1463,13 @@ async def generate_ride_plan(
                     break
         if not duplicate:
             unique_candidates.append(candidate)
-
     if not unique_candidates:
         unique_candidates = scored_candidates
 
+    # Bearing-based dedupe makes the surfaced 3 actually feel different on the map.
+    unique_candidates = deduplicate_by_bearing(unique_candidates, min_separation_deg=35.0, keep_at_least=3)
+
+    # ----- Strava segment matching for popularity (now graceful on empty data) -----
     segment_candidate_limit = min(len(unique_candidates), 4 if prefer_popular_routes else 1)
     if segment_candidate_limit:
         access_token = None
@@ -1837,17 +1480,24 @@ async def generate_ride_plan(
                 client_secret=settings.strava_client_secret,
                 db=db,
             )
-        except Exception as exc:
+        except Exception:
+            access_token = None
             if prefer_popular_routes:
-                raise HTTPException(
-                    status_code=502,
-                    detail="I couldn't load Strava segment data right now, so I could not honor the popularity request.",
-                ) from exc
+                planner_warnings.append(
+                    "I couldn't load Strava segment data this time, so popularity scoring fell back to map signals only."
+                )
 
         if access_token:
+            overlap_threshold = (
+                POPULARITY_OVERLAP_THRESHOLD if prefer_popular_routes else 32.0
+            )
             segment_results = await asyncio.gather(
                 *(
-                    summarize_route_segments(candidate["route"], access_token=access_token)
+                    summarize_route_segments(
+                        candidate["route"],
+                        access_token=access_token,
+                        overlap_threshold=overlap_threshold,
+                    )
                     for candidate in unique_candidates[:segment_candidate_limit]
                 ),
                 return_exceptions=True,
@@ -1877,12 +1527,9 @@ async def generate_ride_plan(
 
             if prefer_popular_routes:
                 if popularity_ready == 0:
-                    raise HTTPException(
-                        status_code=502,
-                        detail=(
-                            "I couldn't match enough Strava segment popularity data onto the generated routes from this start. "
-                            "Try a slightly different start point or a more road-oriented request."
-                        ),
+                    planner_warnings.append(
+                        "Strava segment popularity data was sparse on these routes — showing them anyway. "
+                        "A different start point near busier roads typically returns more popularity signal."
                     )
                 unique_candidates.sort(key=lambda candidate: candidate["score"], reverse=True)
 
@@ -1951,6 +1598,9 @@ async def generate_ride_plan(
         )
 
     explanation: list[str] = []
+    # Surface any soft warnings from filtering (gravel fallback, missing popularity data, ...)
+    # before the generic explanation lines so the user reads them first.
+    explanation.extend(planner_warnings)
     if inferred_start:
         explanation.append("No start point was selected, so I inferred your most common historical ride start area.")
     else:

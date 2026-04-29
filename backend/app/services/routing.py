@@ -221,9 +221,10 @@ class GraphHopperClient:
         desired_style: str | None,
         intensity_label: str | None,
         sport_type: str | None,
+        heading: float | None = None,
     ) -> GeneratedRoute:
         route_distance_m = max(5000, int(distance_miles * 1609.34))
-        payload = {
+        payload: dict[str, Any] = {
             "profile": resolve_profile(desired_style, intensity_label, sport_type),
             "points": [[start_lng, start_lat]],
             "algorithm": "round_trip",
@@ -234,6 +235,10 @@ class GraphHopperClient:
             "elevation": True,
             "details": ["surface", "road_class", "bike_network"],
         }
+        if heading is not None:
+            # GraphHopper's round_trip honours `heading` as a soft bias on initial direction.
+            # We normalise to [0, 360) so the same bias yields the same loop family across calls.
+            payload["heading"] = round(float(heading) % 360.0, 1)
 
         return await self._request_route(payload)
 

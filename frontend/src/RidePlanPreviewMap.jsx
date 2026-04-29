@@ -5,6 +5,9 @@ import 'leaflet/dist/leaflet.css'
 const DEFAULT_CENTER = [39.8283, -98.5795]
 const DEFAULT_ZOOM = 4
 
+const ACTIVE_COLOR = '#155eef'
+const INACTIVE_COLOR = '#98a2b3'
+
 function decodePolyline(encoded, precision = 5) {
   if (!encoded) return []
 
@@ -46,7 +49,16 @@ function decodePolyline(encoded, precision = 5) {
   return coordinates
 }
 
-export default function RidePlanPreviewMap({ plan, selectedStartLocation }) {
+/**
+ * Render every generated candidate on the map. The active one is solid + bold;
+ * inactive candidates are dashed and clickable to swap which one is highlighted.
+ */
+export default function RidePlanPreviewMap({
+  candidates = [],
+  activeIndex = 0,
+  selectedStartLocation,
+  onSelectCandidate
+}) {
   const containerRef = useRef(null)
   const mapRef = useRef(null)
   const layerRef = useRef(null)
@@ -82,20 +94,40 @@ export default function RidePlanPreviewMap({ plan, selectedStartLocation }) {
     layer.clearLayers()
     const bounds = []
 
-    if (plan?.route_polyline) {
-      const points = decodePolyline(plan.route_polyline)
+    // Inactive candidates first so the active one paints on top.
+    candidates.forEach((candidate, index) => {
+      if (index === activeIndex) return
+      const points = decodePolyline(candidate.route_polyline)
+      if (!points.length) return
+
+      const polyline = L.polyline(points, {
+        color: INACTIVE_COLOR,
+        weight: 3,
+        opacity: 0.55,
+        dashArray: '6 6'
+      }).addTo(layer)
+
+      polyline.bindTooltip(candidate.name || `Route ${index + 1}`, { sticky: true })
+      if (typeof onSelectCandidate === 'function') {
+        polyline.on('click', () => onSelectCandidate(index))
+      }
+    })
+
+    const active = candidates[activeIndex]
+    if (active?.route_polyline) {
+      const points = decodePolyline(active.route_polyline)
       if (points.length) {
         L.polyline(points, {
-          color: '#155eef',
-          weight: 4,
-          opacity: 0.8
+          color: ACTIVE_COLOR,
+          weight: 5,
+          opacity: 0.9
         }).addTo(layer)
         bounds.push(...points)
       }
     }
 
-    if (plan?.route_start_lat != null && plan?.route_start_lng != null) {
-      const routeStart = [plan.route_start_lat, plan.route_start_lng]
+    if (active?.route_start_lat != null && active?.route_start_lng != null) {
+      const routeStart = [active.route_start_lat, active.route_start_lng]
       L.circleMarker(routeStart, {
         radius: 8,
         color: '#fc4c02',
@@ -103,7 +135,7 @@ export default function RidePlanPreviewMap({ plan, selectedStartLocation }) {
         fillOpacity: 0.9,
         weight: 2
       })
-        .bindTooltip(plan.route_name ? `Route start · ${plan.route_name}` : 'Route start')
+        .bindTooltip(active.name ? `Route start · ${active.name}` : 'Route start')
         .addTo(layer)
       bounds.push(routeStart)
     }
@@ -121,8 +153,8 @@ export default function RidePlanPreviewMap({ plan, selectedStartLocation }) {
         .addTo(layer)
       bounds.push(selectedPoint)
 
-      if (plan?.route_start_lat != null && plan?.route_start_lng != null) {
-        L.polyline([selectedPoint, [plan.route_start_lat, plan.route_start_lng]], {
+      if (active?.route_start_lat != null && active?.route_start_lng != null) {
+        L.polyline([selectedPoint, [active.route_start_lat, active.route_start_lng]], {
           color: '#98a2b3',
           weight: 2,
           dashArray: '6 6',
@@ -138,7 +170,7 @@ export default function RidePlanPreviewMap({ plan, selectedStartLocation }) {
     }
 
     map.invalidateSize()
-  }, [plan, selectedStartLocation])
+  }, [candidates, activeIndex, selectedStartLocation, onSelectCandidate])
 
   return <div ref={containerRef} className="map-canvas" />
 }
