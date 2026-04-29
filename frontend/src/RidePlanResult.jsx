@@ -158,17 +158,25 @@ export default function RidePlanResult({
                 <span>{fmtMin(candidate.duration_min)}</span>
               </div>
               <div className="route-card__signals">
+                {candidate.bike_network_percent != null && candidate.bike_network_percent >= 10 ? (
+                  <span className="chip chip--bike">{fmtPct(candidate.bike_network_percent)} bike paths</span>
+                ) : null}
+                {candidate.unpaved_percent != null && candidate.unpaved_percent >= 5 ? (
+                  <span className="chip chip--gravel">{fmtPct(candidate.unpaved_percent)} unpaved</span>
+                ) : null}
+                {candidate.trail_percent != null && candidate.trail_percent >= 8 ? (
+                  <span className="chip chip--trail">{fmtPct(candidate.trail_percent)} trail</span>
+                ) : null}
+                {candidate.major_road_percent != null ? (
+                  <span className={`chip${candidate.major_road_percent > 25 ? ' chip--warn' : ''}`}>
+                    {fmtPct(candidate.major_road_percent)} major rd
+                  </span>
+                ) : null}
                 {candidate.novelty_score != null ? (
                   <span className="chip">{fmtPct(candidate.novelty_score)} novel</span>
                 ) : null}
                 {candidate.popularity_score != null ? (
                   <span className="chip">{fmtPct(candidate.popularity_score, '/100')} popular</span>
-                ) : null}
-                {candidate.unpaved_percent != null ? (
-                  <span className="chip">{fmtPct(candidate.unpaved_percent)} unpaved</span>
-                ) : null}
-                {candidate.major_road_percent != null ? (
-                  <span className="chip">{fmtPct(candidate.major_road_percent)} major rd</span>
                 ) : null}
                 {candidate.destination_distance_miles != null ? (
                   <span className="chip">{fmtMi(candidate.destination_distance_miles)} to stop</span>

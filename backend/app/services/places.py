@@ -64,9 +64,33 @@ DESTINATION_FILTERS: dict[str, list[str]] = {
     ],
 }
 GRAVEL_SEGMENT_FILTERS = [
-    'way["highway"~"track|path|bridleway|cycleway"]["surface"~"gravel|fine_gravel|dirt|ground|earth|unpaved|compacted",i]',
+    # Explicitly tagged unpaved surfaces of any rideable highway class.
+    'way["highway"~"track|path|bridleway|cycleway|unclassified"]["surface"~"gravel|fine_gravel|dirt|ground|earth|unpaved|compacted|pebblestone|sand",i]',
+    # Forestry / fire-road tracks: tracktype grade2+ is virtually always gravel.
+    'way["highway"="track"]["tracktype"~"grade2|grade3|grade4|grade5"]',
+    # Plain tracks without a tracktype tag — still very likely unpaved.
     'way["highway"="track"]',
-    'way["highway"="path"]["tracktype"~"grade2|grade3|grade4|grade5"]',
+    # Paths through forests / nature areas that allow bicycles.
+    'way["highway"="path"]["bicycle"~"yes|designated|permissive"]',
+    # Mountain-bike-specific routes.
+    'way["highway"="path"]["mtb"~"yes|designated"]',
+    'way["route"="mtb"]',
+]
+
+# Dedicated cycling infrastructure: separated paths, designated multi-use paths,
+# rail trails, greenways. We deliberately exclude on-road `bicycle=yes` ways
+# because those are still mostly traffic.
+BIKE_PATH_FILTERS = [
+    'way["highway"="cycleway"]',
+    'way["highway"="path"]["bicycle"="designated"]',
+    'way["highway"="footway"]["bicycle"~"yes|designated"]',
+    'way["highway"="pedestrian"]["bicycle"~"yes|designated"]',
+    # Officially-named bike networks (e.g. "Bay Trail", "American River Trail").
+    'way["route"="bicycle"]',
+    'relation["route"="bicycle"]',
+    # Rail-trail conversions are usually tagged either as cycleway or path
+    # with `railway:abandoned`; cover the path case explicitly.
+    'way["highway"="path"]["railway"~"abandoned|disused|razed"]',
 ]
 
 
@@ -183,6 +207,28 @@ class OverpassPlacesClient:
         return await self._search(
             filters=GRAVEL_SEGMENT_FILTERS,
             category="gravel_segment",
+            lat=lat,
+            lng=lng,
+            radius_miles=radius_miles,
+            limit=limit,
+        )
+
+    async def search_bike_paths(
+        self,
+        *,
+        lat: float,
+        lng: float,
+        radius_miles: float,
+        limit: int = 6,
+    ) -> list[PlaceCandidate]:
+        """Find segments of dedicated cycling infrastructure near a start.
+
+        Returns waypoints that route generators can thread through to bias
+        candidate routes onto cycleways instead of generic roads.
+        """
+        return await self._search(
+            filters=BIKE_PATH_FILTERS,
+            category="bike_path",
             lat=lat,
             lng=lng,
             radius_miles=radius_miles,

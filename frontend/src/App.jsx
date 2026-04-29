@@ -95,19 +95,27 @@ const EXPORT_TARGETS = [
 
 const PROMPT_SUGGESTIONS = [
   {
-    label: 'Brewery loop',
-    prompt: 'Casual ride to a brewery, around 22 miles, mellow climbing.'
+    label: 'Bike path explorer',
+    prompt: 'Stay on bike paths and protected cycleways as much as possible, around 20 miles.'
   },
   {
-    label: 'Gravel adventure',
-    prompt: 'Gravel ride that prioritizes real unpaved paths, around 30 miles.'
+    label: 'Rail trail loop',
+    prompt: 'Use the local rail trail or greenway network, around 25 miles, mostly flat.'
+  },
+  {
+    label: 'Gravel paths',
+    prompt: 'Gravel paths and dirt trails, minimize major roads, around 30 miles.'
+  },
+  {
+    label: 'Brewery loop',
+    prompt: 'Casual ride to a brewery, around 22 miles, mellow climbing.'
   },
   {
     label: 'Coffee spin',
     prompt: 'Easy spin to a coffee shop somewhere new, around 18 miles.'
   },
   {
-    label: 'Tempo on popular roads',
+    label: 'Popular tempo',
     prompt: 'Training ride on popular cyclist roads, around 35 miles, steady tempo.'
   }
 ]
@@ -512,14 +520,14 @@ function App() {
             <label>
               Describe the ride you want
               <textarea
-                placeholder="Examples: popular with cyclists 40 mile ride, gravel ride to a brewery under 20 miles that prioritizes unpaved paths, training ride to a taco shop around 18 miles, or a scenic spin by a lake with steady climbing."
+                placeholder="Examples: bike paths only around 20 miles, rail trail loop, gravel paths to a brewery under 25 miles, popular cyclist roads for a 40 mile tempo, or a scenic spin by a lake."
                 value={recForm.ride_brief}
                 onChange={(e) => setRecForm({ ...recForm, ride_brief: e.target.value })}
                 required
               />
             </label>
             <div className="meta">
-              The text box can now ask for destinations and scenery directly: brewery, taco shop, coffee stop, bakery, lake, river, park, gravel-focused terrain, and routes that stay on roads popular with cyclists.
+              Ask for path types ("bike path", "rail trail", "greenway", "gravel paths"), destinations ("brewery", "taco shop", "coffee", "bakery", "lake", "river", "park"), or roads "popular with cyclists" — the planner will route through the matching map segments instead of defaulting to the nearest big road.
             </div>
             <div className="prompt-shelf">
               {PROMPT_SUGGESTIONS.map((suggestion) => (

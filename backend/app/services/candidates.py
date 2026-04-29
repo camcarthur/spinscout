@@ -158,6 +158,9 @@ class CandidatePlanInputs:
     gravel_segments: list[PlaceCandidate]
     gravel_requested: bool
     explicit_distance_requested: bool
+    bike_path_segments: list[PlaceCandidate] = field(default_factory=list)
+    prefer_bike_paths: bool = False
+    prefer_unpaved_paths: bool = False
 
 
 def plan_candidate_requests(inputs: CandidatePlanInputs) -> list[CandidateRequest]:
@@ -198,11 +201,29 @@ def plan_candidate_requests(inputs: CandidatePlanInputs) -> list[CandidateReques
         requests.append(_destination_request(inputs, place, seed=DEFAULT_SEEDS[index % len(DEFAULT_SEEDS)]))
 
     # Gravel anchor candidates that deliberately route through tagged unpaved segments.
+    # When the rider asked for "gravel paths/trails" specifically (not just a
+    # gravel ride) we generate multi-anchor candidates more aggressively.
     if inputs.gravel_requested:
-        for segment in inputs.gravel_segments[:2]:
+        for segment in inputs.gravel_segments[:3]:
             requests.append(_gravel_anchor_request(inputs, [segment]))
-        if len(inputs.gravel_segments) >= 2 and (inputs.target_distance_miles or 0) >= 15:
+        if len(inputs.gravel_segments) >= 2 and (inputs.target_distance_miles or 0) >= 12:
             requests.append(_gravel_anchor_request(inputs, inputs.gravel_segments[:2]))
+        if (
+            inputs.prefer_unpaved_paths
+            and len(inputs.gravel_segments) >= 3
+            and (inputs.target_distance_miles or 0) >= 18
+        ):
+            # Three-anchor route stitches together a much higher unpaved share
+            # — this is the "gravel paths" power-user case.
+            requests.append(_gravel_anchor_request(inputs, inputs.gravel_segments[:3]))
+
+    # Bike-path anchor candidates: thread the route through nearby cycleways /
+    # rail trails / multi-use paths so GraphHopper actually picks them up.
+    if inputs.prefer_bike_paths and inputs.bike_path_segments:
+        for segment in inputs.bike_path_segments[:3]:
+            requests.append(_bike_path_anchor_request(inputs, [segment]))
+        if len(inputs.bike_path_segments) >= 2 and (inputs.target_distance_miles or 0) >= 10:
+            requests.append(_bike_path_anchor_request(inputs, inputs.bike_path_segments[:2]))
 
     return requests
 
@@ -378,6 +399,35 @@ def _gravel_anchor_request(
 
     return CandidateRequest(
         mode="gravel_anchor",
+        factory=_build,
+        anchor_place=segments[0] if segments else None,
+        metadata={"segment_count": len(segments)},
+    )
+
+
+def _bike_path_anchor_request(
+    inputs: CandidatePlanInputs,
+    segments: list[PlaceCandidate],
+) -> CandidateRequest:
+    """Route through one or more nearby cycleway segments so GraphHopper
+    actually surfaces a path-led loop instead of defaulting to roads.
+
+    We pin the routing profile to plain `bike` (not racingbike/mtb) because
+    the bike profile in GraphHopper most strongly prefers `bike_network`
+    edges and respects `cycleway` highway tags.
+    """
+    async def _build() -> GeneratedRoute:
+        points = [inputs.start, *((s.lat, s.lng) for s in segments), inputs.start]
+        return await inputs.routing_client.generate_route(
+            points=points,
+            # Force `casual` style so resolve_profile() returns the `bike` profile.
+            desired_style="casual",
+            intensity_label=None,
+            sport_type=None,
+        )
+
+    return CandidateRequest(
+        mode="bike_path_anchor",
         factory=_build,
         anchor_place=segments[0] if segments else None,
         metadata={"segment_count": len(segments)},

@@ -574,6 +574,26 @@ label {
   letter-spacing: 0.01em;
 }
 
+.chip--bike {
+  background: rgba(18, 183, 106, 0.12);
+  color: #047857;
+}
+
+.chip--gravel {
+  background: rgba(180, 83, 9, 0.12);
+  color: #92400e;
+}
+
+.chip--trail {
+  background: rgba(120, 53, 15, 0.12);
+  color: #7c2d12;
+}
+
+.chip--warn {
+  background: rgba(220, 38, 38, 0.10);
+  color: #b91c1c;
+}
+
 .badge--accent {
   background: #155eef;
   color: white;

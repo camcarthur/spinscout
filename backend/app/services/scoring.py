@@ -65,6 +65,8 @@ class RideContext:
     gravel_requested: bool = False
     prefer_popular_routes: bool = False
     destination_threshold_miles: float = 0.5
+    prefer_bike_paths: bool = False
+    prefer_unpaved_paths: bool = False
 
 
 def gravel_signal(route: GeneratedRoute) -> float:
@@ -248,13 +250,47 @@ def _destination_score(
 
 def _surface_score(route: GeneratedRoute, route_mode: str, ctx: RideContext, reasons: list[str]) -> float:
     score = 0.0
-    if ctx.gravel_requested:
+
+    # ----- Bike-path-targeted requests (cycleway / rail-trail / greenway) -----
+    # Strongest signal: bike_network_percent (GraphHopper's `bike_network`
+    # detail covers cycleways and signed bicycle routes). We deliberately
+    # weight this above gravel scoring so a "bike path" brief always picks
+    # cycleways over gravel even if both are present.
+    if ctx.prefer_bike_paths:
+        if route.bike_network_percent is not None:
+            score += route.bike_network_percent * 0.55
+            if route.bike_network_percent >= 50:
+                reasons.append("Most of the route runs on the mapped bike-network (cycleways / signed bike routes).")
+            elif route.bike_network_percent >= 30:
+                reasons.append("It uses mapped bike-network segments for a substantial chunk of the loop.")
+        # Some "paths" are paved off-road shared-use routes — still good.
         if route.trail_percent is not None:
-            score += route.trail_percent * 0.3
+            score += route.trail_percent * 0.18
+        if route.major_road_percent is not None:
+            # Bike-path requesters really don't want major-road exposure.
+            score += max(0.0, 18 - route.major_road_percent * 0.55)
+            if route.major_road_percent > 20:
+                score -= (route.major_road_percent - 20) * 1.6
+        if route_mode == "bike_path_anchor":
+            score += 18
+            reasons.append("It was deliberately routed through nearby cycleway / rail-trail segments.")
+        # Hard penalty for routes that completely ignore the bike network.
+        if (route.bike_network_percent or 0) < 12 and (route.major_road_percent or 0) > 25:
+            score -= 36
+        return score
+
+    if ctx.gravel_requested:
+        # "gravel paths/trails" specifically gets a stronger trail/unpaved bias
+        # than a generic "gravel ride".
+        unpaved_weight = 0.55 if ctx.prefer_unpaved_paths else 0.42
+        trail_weight = 0.42 if ctx.prefer_unpaved_paths else 0.30
+
+        if route.trail_percent is not None:
+            score += route.trail_percent * trail_weight
             if route.trail_percent >= 18:
                 reasons.append("It uses mapped trail and track segments.")
         if route.unpaved_percent is not None:
-            score += route.unpaved_percent * 0.42
+            score += route.unpaved_percent * unpaved_weight
             if route.unpaved_percent >= 18:
                 reasons.append("It includes real unpaved terrain instead of defaulting to pavement.")
         if route.major_road_percent is not None:
@@ -264,8 +300,12 @@ def _surface_score(route: GeneratedRoute, route_mode: str, ctx: RideContext, rea
             if route.major_road_percent > 18:
                 score -= (route.major_road_percent - 18) * 1.8
         if route_mode == "gravel_anchor":
-            score += 12
-            reasons.append("It deliberately routes through nearby gravel-tagged map segments.")
+            anchor_count = 1  # default for single-segment anchor
+            score += 14 if ctx.prefer_unpaved_paths else 12
+            if ctx.prefer_unpaved_paths:
+                reasons.append("It threads through multiple nearby gravel/dirt-tagged segments.")
+            else:
+                reasons.append("It deliberately routes through nearby gravel-tagged map segments.")
         if (route.unpaved_percent or 0) < 8 and (route.trail_percent or 0) < 8 and (route.major_road_percent or 0) > 24:
             score -= 42
         return score
@@ -370,6 +410,56 @@ def filter_gravel_candidates(
             "Pinning a start nearer a known dirt/track network usually unlocks better gravel options."
         )
     return top_by_signal, warning
+
+
+def filter_bike_path_candidates(
+    candidates: list[dict[str, Any]],
+    *,
+    has_bike_path_segments: bool,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Keep candidates that materially use the bike network.
+
+    Like the gravel filter, this never raises — when nothing meets the bar
+    we return the best-by-bike-network options and surface a soft warning.
+    """
+    if not candidates:
+        return candidates, None
+
+    threshold = 25.0  # %
+    forward = [
+        c
+        for c in candidates
+        if (c["route"].bike_network_percent or 0) >= threshold
+        or c.get("route_mode") == "bike_path_anchor"
+    ]
+    if forward:
+        # Penalise any survivors with very high major-road percentages —
+        # a "bike path" request really shouldn't return a major-road loop.
+        forward.sort(
+            key=lambda c: (
+                (c["route"].bike_network_percent or 0) - (c["route"].major_road_percent or 0) * 0.5
+            ),
+            reverse=True,
+        )
+        return forward, None
+
+    # No candidate cleared the bar. Keep the best-by-bike-network and warn.
+    by_bike = sorted(
+        candidates,
+        key=lambda c: (c["route"].bike_network_percent or 0),
+        reverse=True,
+    )[:3]
+    if has_bike_path_segments:
+        warning = (
+            "Bike paths were tagged near this start, but GraphHopper still preferred roads for the requested distance. "
+            "Showing the most bike-network-leaning routes — try a slightly different start point or shorter distance to land on more separated infrastructure."
+        )
+    else:
+        warning = (
+            "I couldn't find clearly-tagged cycleways or rail trails near this start, so these routes are the best mix the road network offered. "
+            "Pinning a start nearer a known bike-path network usually unlocks better path-led routes."
+        )
+    return by_bike, warning
 
 
 def filter_destination_candidates(

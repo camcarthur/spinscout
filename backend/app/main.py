@@ -42,6 +42,7 @@ from app.services.scoring import (
     POPULARITY_OVERLAP_THRESHOLD,
     RideContext,
     distance_tolerance_miles,
+    filter_bike_path_candidates,
     filter_destination_candidates,
     filter_gravel_candidates,
     gravel_signal,
@@ -115,6 +116,75 @@ POPULARITY_KEYWORDS: tuple[str, ...] = (
     "locals ride",
     "heatmap",
 )
+
+# When the rider explicitly asks for protected/separated cycling infrastructure
+# we want to anchor the route through OSM-tagged cycleways and reward the
+# `bike_network` GraphHopper detail more aggressively.
+BIKE_PATH_KEYWORDS: tuple[str, ...] = (
+    "bike path",
+    "bike paths",
+    "bike trail",
+    "bike trails",
+    "bike lane",
+    "bike lanes",
+    "bicycle path",
+    "bicycle paths",
+    "cycleway",
+    "cycle way",
+    "cycle path",
+    "cycle paths",
+    "cycle lane",
+    "cycle lanes",
+    "rail trail",
+    "rail-trail",
+    "rails to trails",
+    "greenway",
+    "greenways",
+    "multi-use path",
+    "multiuse path",
+    "mup ",
+    " mup",
+    "protected bike",
+    "protected lane",
+    "separated bike",
+    "separated lane",
+    "off-road bike",
+    "paved trail",
+    "paved trails",
+    "paved path",
+    "paved paths",
+)
+
+# Distinct from "gravel ride" — when the rider asks for gravel *paths/trails*
+# we lean even harder on unpaved + trail signals and try to thread through
+# multiple gravel anchors instead of just one.
+GRAVEL_PATH_KEYWORDS: tuple[str, ...] = (
+    "gravel path",
+    "gravel paths",
+    "gravel trail",
+    "gravel trails",
+    "gravel track",
+    "gravel tracks",
+    "dirt path",
+    "dirt paths",
+    "dirt trail",
+    "dirt trails",
+    "fire road",
+    "fire roads",
+    "double track",
+    "doubletrack",
+    "single track",
+    "singletrack",
+    "jeep trail",
+    "jeep road",
+)
+
+
+def text_matches_any(text: str, keywords: tuple[str, ...]) -> bool:
+    """Whole-phrase substring match. Keywords with leading/trailing spaces
+    enforce word boundaries (e.g. `" mup"` doesn't match `mountain`).
+    """
+    return any(keyword in text for keyword in keywords)
 
 
 def normalize_origin(url: str) -> str:
@@ -305,6 +375,8 @@ def is_popularity_request_text(ride_brief: str) -> bool:
 def parse_ride_brief(ride_brief: str) -> dict[str, str | float | int | None]:
     text = ride_brief.strip().lower()
     prefer_popular_routes = is_popularity_request_text(ride_brief)
+    prefer_bike_paths = text_matches_any(text, BIKE_PATH_KEYWORDS)
+    prefer_unpaved_paths = text_matches_any(text, GRAVEL_PATH_KEYWORDS)
 
     matched_styles = [
         style for style, keywords in STYLE_KEYWORDS.items() if any(keyword in text for keyword in keywords)
@@ -415,6 +487,8 @@ def parse_ride_brief(ride_brief: str) -> dict[str, str | float | int | None]:
         "destination_category": destination_category,
         "explicit_distance_requested": 1 if explicit_distance_requested else 0,
         "prefer_popular_routes": 1 if prefer_popular_routes else 0,
+        "prefer_bike_paths": 1 if prefer_bike_paths else 0,
+        "prefer_unpaved_paths": 1 if prefer_unpaved_paths else 0,
     }
 
 
@@ -1204,6 +1278,8 @@ async def generate_ride_plan(
     explicit_distance_requested = bool(parsed_brief.get("explicit_distance_requested"))
     gravel_requested = is_gravel_request(desired_style, requested_sport_type, payload.ride_brief)
     prefer_popular_routes = bool(parsed_brief.get("prefer_popular_routes"))
+    prefer_bike_paths = bool(parsed_brief.get("prefer_bike_paths"))
+    prefer_unpaved_paths = bool(parsed_brief.get("prefer_unpaved_paths"))
 
     inferred_start = False
     selected_start = None
@@ -1320,14 +1396,34 @@ async def generate_ride_plan(
     if gravel_requested:
         gravel_radius = clamp_number((target_distance_miles or max_distance_miles or 18.0) * 0.45, 2.0, 12.0)
         try:
+            # When the brief specifically calls out "gravel paths/trails" we
+            # widen the segment search so we can stitch through 2-3 anchors.
+            gravel_limit = 6 if prefer_unpaved_paths else 4
             gravel_segments = await places_client.search_gravel_segments(
                 lat=selected_start[0],
                 lng=selected_start[1],
                 radius_miles=gravel_radius,
-                limit=4,
+                limit=gravel_limit,
             )
         except PlacesError:
             gravel_segments = []
+
+    bike_path_segments: list[PlaceCandidate] = []
+    if prefer_bike_paths:
+        bike_path_radius = clamp_number(
+            (target_distance_miles or max_distance_miles or 18.0) * 0.4,
+            2.0,
+            10.0,
+        )
+        try:
+            bike_path_segments = await places_client.search_bike_paths(
+                lat=selected_start[0],
+                lng=selected_start[1],
+                radius_miles=bike_path_radius,
+                limit=6,
+            )
+        except PlacesError:
+            bike_path_segments = []
 
     # ----- Plan and dispatch the candidate routing calls (services/candidates) -----
     plan_inputs = CandidatePlanInputs(
@@ -1344,6 +1440,9 @@ async def generate_ride_plan(
         gravel_segments=gravel_segments,
         gravel_requested=gravel_requested,
         explicit_distance_requested=explicit_distance_requested,
+        bike_path_segments=bike_path_segments,
+        prefer_bike_paths=prefer_bike_paths,
+        prefer_unpaved_paths=prefer_unpaved_paths,
     )
     candidate_requests = plan_candidate_requests(plan_inputs)
     generated_results = await asyncio.gather(
@@ -1369,6 +1468,8 @@ async def generate_ride_plan(
         gravel_requested=gravel_requested,
         prefer_popular_routes=prefer_popular_routes,
         destination_threshold_miles=destination_threshold_miles(destination_category),
+        prefer_bike_paths=prefer_bike_paths,
+        prefer_unpaved_paths=prefer_unpaved_paths,
     )
 
     scored_candidates: list[dict] = []
@@ -1446,6 +1547,14 @@ async def generate_ride_plan(
         )
         if gravel_warning:
             planner_warnings.append(gravel_warning)
+
+    if prefer_bike_paths:
+        scored_candidates, bike_path_warning = filter_bike_path_candidates(
+            scored_candidates,
+            has_bike_path_segments=bool(bike_path_segments),
+        )
+        if bike_path_warning:
+            planner_warnings.append(bike_path_warning)
 
     scored_candidates.sort(key=lambda candidate: candidate["score"], reverse=True)
 
